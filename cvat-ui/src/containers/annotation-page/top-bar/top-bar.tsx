@@ -1,4 +1,5 @@
 // Copyright (C) 2021-2022 Intel Corporation
+// Copyright (C) 2023 CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -10,7 +11,6 @@ import Input from 'antd/lib/input';
 import copy from 'copy-to-clipboard';
 
 import {
-    activateObject,
     changeFrameAsync,
     changeWorkspace as changeWorkspaceAction,
     collectStatisticsAsync,
@@ -19,31 +19,32 @@ import {
     searchAnnotationsAsync,
     searchEmptyFrameAsync,
     setForceExitAnnotationFlag as setForceExitAnnotationFlagAction,
-    switchPredictor as switchPredictorAction,
-    getPredictionsAsync,
     showFilters as showFiltersAction,
     showStatistics as showStatisticsAction,
     switchPlay,
     undoActionAsync,
+    deleteFrameAsync,
+    restoreFrameAsync,
+    switchNavigationBlocked as switchNavigationBlockedAction,
 } from 'actions/annotation-actions';
 import AnnotationTopBarComponent from 'components/annotation-page/top-bar/top-bar';
 import { Canvas } from 'cvat-canvas-wrapper';
 import { Canvas3d } from 'cvat-canvas3d-wrapper';
+import { DimensionType } from 'cvat-core-wrapper';
 import {
     CombinedState,
     FrameSpeed,
     Workspace,
-    PredictorState,
-    DimensionType,
     ActiveControl,
     ToolsBlockerState,
-} from 'reducers/interfaces';
+} from 'reducers';
 import isAbleToChangeFrame from 'utils/is-able-to-change-frame';
 import GlobalHotKeys, { KeyMap } from 'utils/mousetrap-react';
 import { switchToolsBlockerState } from 'actions/settings-actions';
 
 interface StateToProps {
     jobInstance: any;
+    frameIsDeleted: boolean;
     frameNumber: number;
     frameFilename: string;
     frameStep: number;
@@ -53,20 +54,18 @@ interface StateToProps {
     playing: boolean;
     saving: boolean;
     canvasIsReady: boolean;
-    savingStatuses: string[];
     undoAction?: string;
     redoAction?: string;
     autoSave: boolean;
     autoSaveInterval: number;
     toolsBlockerState: ToolsBlockerState;
+    showDeletedFrames: boolean;
     workspace: Workspace;
     keyMap: KeyMap;
     normalizedKeyMap: Record<string, string>;
     canvasInstance: Canvas | Canvas3d;
     forceExit: boolean;
-    predictor: PredictorState;
     activeControl: ActiveControl;
-    isTrainingActive: boolean;
 }
 
 interface DispatchToProps {
@@ -81,8 +80,10 @@ interface DispatchToProps {
     searchEmptyFrame(sessionInstance: any, frameFrom: number, frameTo: number): void;
     setForceExitAnnotationFlag(forceExit: boolean): void;
     changeWorkspace(workspace: Workspace): void;
-    switchPredictor(predictorEnabled: boolean): void;
     onSwitchToolsBlockerState(toolsBlockerState: ToolsBlockerState): void;
+    deleteFrame(frame: number): void;
+    restoreFrame(frame: number): void;
+    switchNavigationBlocked(blocked: boolean): void;
 }
 
 function mapStateToProps(state: CombinedState): StateToProps {
@@ -91,27 +92,34 @@ function mapStateToProps(state: CombinedState): StateToProps {
             player: {
                 playing,
                 frame: {
-                    filename: frameFilename, number: frameNumber, delay: frameDelay, fetching: frameFetching,
+                    data: { deleted: frameIsDeleted },
+                    filename: frameFilename,
+                    number: frameNumber,
+                    delay: frameDelay,
+                    fetching: frameFetching,
                 },
             },
             annotations: {
-                saving: { uploading: saving, statuses: savingStatuses, forceExit },
+                saving: { uploading: saving, forceExit },
                 history,
             },
             job: { instance: jobInstance },
             canvas: { ready: canvasIsReady, instance: canvasInstance, activeControl },
             workspace,
-            predictor,
         },
         settings: {
-            player: { frameSpeed, frameStep },
-            workspace: { autoSave, autoSaveInterval, toolsBlockerState },
+            player: { frameSpeed, frameStep, showDeletedFrames },
+            workspace: {
+                autoSave,
+                autoSaveInterval,
+                toolsBlockerState,
+            },
         },
         shortcuts: { keyMap, normalizedKeyMap },
-        plugins: { list },
     } = state;
 
     return {
+        frameIsDeleted,
         frameStep,
         frameSpeed,
         frameDelay,
@@ -119,7 +127,6 @@ function mapStateToProps(state: CombinedState): StateToProps {
         playing,
         canvasIsReady,
         saving,
-        savingStatuses,
         frameNumber,
         frameFilename,
         jobInstance,
@@ -128,14 +135,13 @@ function mapStateToProps(state: CombinedState): StateToProps {
         autoSave,
         autoSaveInterval,
         toolsBlockerState,
+        showDeletedFrames,
         workspace,
         keyMap,
         normalizedKeyMap,
         canvasInstance,
         forceExit,
-        predictor,
         activeControl,
-        isTrainingActive: list.PREDICT,
     };
 }
 
@@ -170,20 +176,22 @@ function mapDispatchToProps(dispatch: any): DispatchToProps {
             dispatch(searchEmptyFrameAsync(sessionInstance, frameFrom, frameTo));
         },
         changeWorkspace(workspace: Workspace): void {
-            dispatch(activateObject(null, null));
             dispatch(changeWorkspaceAction(workspace));
         },
         setForceExitAnnotationFlag(forceExit: boolean): void {
             dispatch(setForceExitAnnotationFlagAction(forceExit));
         },
-        switchPredictor(predictorEnabled: boolean): void {
-            dispatch(switchPredictorAction(predictorEnabled));
-            if (predictorEnabled) {
-                dispatch(getPredictionsAsync());
-            }
-        },
         onSwitchToolsBlockerState(toolsBlockerState: ToolsBlockerState): void {
             dispatch(switchToolsBlockerState(toolsBlockerState));
+        },
+        deleteFrame(frame: number): void {
+            dispatch(deleteFrameAsync(frame));
+        },
+        restoreFrame(frame: number): void {
+            dispatch(restoreFrameAsync(frame));
+        },
+        switchNavigationBlocked(blocked: boolean): void {
+            dispatch(switchNavigationBlockedAction(blocked));
         },
     };
 }
@@ -272,13 +280,11 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
 
     private showStatistics = (): void => {
         const { jobInstance, showStatistics } = this.props;
-
         showStatistics(jobInstance);
     };
 
     private showFilters = (): void => {
         const { jobInstance, showFilters } = this.props;
-
         showFilters(jobInstance);
     };
 
@@ -294,13 +300,14 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         }
     };
 
-    private onFirstFrame = (): void => {
+    private onFirstFrame = async (): Promise<void> => {
         const {
-            frameNumber, jobInstance, playing, onSwitchPlay,
+            frameNumber, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
 
-        const newFrame = jobInstance.startFrame;
-        if (newFrame !== frameNumber) {
+        const newFrame = showDeletedFrames ? jobInstance.startFrame :
+            await jobInstance.frames.search({ notDeleted: true }, jobInstance.startFrame, frameNumber);
+        if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -308,13 +315,21 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         }
     };
 
-    private onBackward = (): void => {
+    private onBackward = async (): Promise<void> => {
         const {
-            frameNumber, frameStep, jobInstance, playing, onSwitchPlay,
+            frameNumber, frameStep, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
 
-        const newFrame = Math.max(jobInstance.startFrame, frameNumber - frameStep);
-        if (newFrame !== frameNumber) {
+        let newFrame = Math.max(jobInstance.startFrame, frameNumber - frameStep);
+        if (!showDeletedFrames) {
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: true, offset: frameStep },
+                Math.max(jobInstance.startFrame, frameNumber - 1),
+                jobInstance.startFrame,
+            );
+        }
+
+        if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -322,15 +337,17 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         }
     };
 
-    private onPrevFrame = (): void => {
+    private onPrevFrame = async (): Promise<void> => {
         const { prevButtonType } = this.state;
         const {
-            frameNumber, jobInstance, playing, onSwitchPlay,
+            frameNumber, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
         const { startFrame } = jobInstance;
 
-        const newFrame = Math.max(jobInstance.startFrame, frameNumber - 1);
-        if (newFrame !== frameNumber) {
+        const frameFrom = Math.max(jobInstance.startFrame, frameNumber - 1);
+        const newFrame = showDeletedFrames ? frameFrom :
+            await jobInstance.frames.search({ notDeleted: true }, frameFrom, jobInstance.startFrame);
+        if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -338,22 +355,24 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
             if (prevButtonType === 'regular') {
                 this.changeFrame(newFrame);
             } else if (prevButtonType === 'filtered') {
-                this.searchAnnotations(frameNumber - 1, startFrame);
+                this.searchAnnotations(newFrame, startFrame);
             } else {
-                this.searchEmptyFrame(frameNumber - 1, startFrame);
+                this.searchEmptyFrame(newFrame, startFrame);
             }
         }
     };
 
-    private onNextFrame = (): void => {
+    private onNextFrame = async (): Promise<void> => {
         const { nextButtonType } = this.state;
         const {
-            frameNumber, jobInstance, playing, onSwitchPlay,
+            frameNumber, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
         const { stopFrame } = jobInstance;
 
-        const newFrame = Math.min(jobInstance.stopFrame, frameNumber + 1);
-        if (newFrame !== frameNumber) {
+        const frameFrom = Math.min(jobInstance.stopFrame, frameNumber + 1);
+        const newFrame = showDeletedFrames ? frameFrom :
+            await jobInstance.frames.search({ notDeleted: true }, frameFrom, jobInstance.stopFrame);
+        if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -361,20 +380,27 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
             if (nextButtonType === 'regular') {
                 this.changeFrame(newFrame);
             } else if (nextButtonType === 'filtered') {
-                this.searchAnnotations(frameNumber + 1, stopFrame);
+                this.searchAnnotations(newFrame, stopFrame);
             } else {
-                this.searchEmptyFrame(frameNumber + 1, stopFrame);
+                this.searchEmptyFrame(newFrame, stopFrame);
             }
         }
     };
 
-    private onForward = (): void => {
+    private onForward = async (): Promise<void> => {
         const {
-            frameNumber, frameStep, jobInstance, playing, onSwitchPlay,
+            frameNumber, frameStep, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
+        let newFrame = Math.min(jobInstance.stopFrame, frameNumber + frameStep);
+        if (!showDeletedFrames) {
+            newFrame = await jobInstance.frames.search(
+                { notDeleted: true, offset: frameStep },
+                Math.min(jobInstance.stopFrame, frameNumber + 1),
+                jobInstance.stopFrame,
+            );
+        }
 
-        const newFrame = Math.min(jobInstance.stopFrame, frameNumber + frameStep);
-        if (newFrame !== frameNumber) {
+        if (newFrame !== frameNumber && newFrame !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -382,13 +408,14 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         }
     };
 
-    private onLastFrame = (): void => {
+    private onLastFrame = async (): Promise<void> => {
         const {
-            frameNumber, jobInstance, playing, onSwitchPlay,
+            frameNumber, jobInstance, playing, onSwitchPlay, showDeletedFrames,
         } = this.props;
 
-        const newFrame = jobInstance.stopFrame;
-        if (newFrame !== frameNumber) {
+        const newFrame = showDeletedFrames ? jobInstance.stopFrame :
+            await jobInstance.frames.search({ notDeleted: true }, jobInstance.stopFrame, frameNumber);
+        if (newFrame !== frameNumber && frameNumber !== null) {
             if (playing) {
                 onSwitchPlay(false);
             }
@@ -418,11 +445,11 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         if (playing) {
             onSwitchPlay(false);
         }
-        this.changeFrame(value as number);
+        this.changeFrame(value);
     };
 
     private onChangePlayerInputValue = (value: number): void => {
-        const { onSwitchPlay, playing, frameNumber } = this.props;
+        const { frameNumber, onSwitchPlay, playing } = this.props;
         if (value !== frameNumber) {
             if (playing) {
                 onSwitchPlay(false);
@@ -465,6 +492,16 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         const { origin, pathname } = window.location;
         const url = `${origin}${pathname}?frame=${frameNumber}`;
         copy(url);
+    };
+
+    private onDeleteFrame = (): void => {
+        const { deleteFrame, frameNumber } = this.props;
+        deleteFrame(frameNumber);
+    };
+
+    private onRestoreFrame = (): void => {
+        const { restoreFrame, frameNumber } = this.props;
+        restoreFrame(frameNumber);
     };
 
     private beforeUnloadCallback = (event: BeforeUnloadEvent): string | undefined => {
@@ -510,7 +547,7 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
                     if (stillPlaying) {
                         if (isAbleToChangeFrame()) {
                             onChangeFrame(frameNumber + 1 + framesSkipped, stillPlaying, framesSkipped + 1);
-                        } else if (jobInstance.dimension === DimensionType.DIM_2D) {
+                        } else if (jobInstance.dimension === DimensionType.DIMENSION_2D) {
                             onSwitchPlay(false);
                         } else {
                             setTimeout(() => this.play(), frameDelay);
@@ -557,23 +594,21 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
         const {
             playing,
             saving,
-            savingStatuses,
             jobInstance,
             jobInstance: { startFrame, stopFrame },
             frameNumber,
             frameFilename,
+            frameIsDeleted,
             undoAction,
             redoAction,
             workspace,
             canvasIsReady,
             keyMap,
             normalizedKeyMap,
-            predictor,
-            isTrainingActive,
             activeControl,
             searchAnnotations,
             changeWorkspace,
-            switchPredictor,
+            switchNavigationBlocked,
             toolsBlockerState,
         } = this.props;
 
@@ -587,6 +622,7 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
             SAVE_JOB: keyMap.SAVE_JOB,
             UNDO: keyMap.UNDO,
             REDO: keyMap.REDO,
+            DELETE_FRAME: keyMap.DELETE_FRAME,
             NEXT_FRAME: keyMap.NEXT_FRAME,
             PREV_FRAME: keyMap.PREV_FRAME,
             FORWARD_FRAME: keyMap.FORWARD_FRAME,
@@ -614,6 +650,12 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
                 preventDefault(event);
                 if (!saving) {
                     this.onSaveAnnotation();
+                }
+            },
+            DELETE_FRAME: (event: KeyboardEvent | undefined) => {
+                preventDefault(event);
+                if (canvasIsReady) {
+                    this.onDeleteFrame();
                 }
             },
             NEXT_FRAME: (event: KeyboardEvent | undefined) => {
@@ -683,17 +725,18 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
                     onSliderChange={this.onChangePlayerSliderValue}
                     onInputChange={this.onChangePlayerInputValue}
                     onURLIconClick={this.onURLIconClick}
+                    onDeleteFrame={this.onDeleteFrame}
+                    onRestoreFrame={this.onRestoreFrame}
                     changeWorkspace={changeWorkspace}
-                    switchPredictor={switchPredictor}
-                    predictor={predictor}
+                    switchNavigationBlocked={switchNavigationBlocked}
                     workspace={workspace}
                     playing={playing}
                     saving={saving}
-                    savingStatuses={savingStatuses}
                     startFrame={startFrame}
                     stopFrame={stopFrame}
                     frameNumber={frameNumber}
                     frameFilename={frameFilename}
+                    frameDeleted={frameIsDeleted}
                     inputFrameRef={this.inputFrameRef}
                     undoAction={undoAction}
                     redoAction={redoAction}
@@ -701,9 +744,10 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
                     undoShortcut={normalizedKeyMap.UNDO}
                     redoShortcut={normalizedKeyMap.REDO}
                     drawShortcut={normalizedKeyMap.SWITCH_DRAW_MODE}
-                    // this shortcut is handled in interactionHandler.ts separatelly
+                    // this shortcut is handled in interactionHandler.ts separately
                     switchToolsBlockerShortcut={normalizedKeyMap.SWITCH_TOOLS_BLOCKER_STATE}
                     playPauseShortcut={normalizedKeyMap.PLAY_PAUSE}
+                    deleteFrameShortcut={normalizedKeyMap.DELETE_FRAME}
                     nextFrameShortcut={normalizedKeyMap.NEXT_FRAME}
                     previousFrameShortcut={normalizedKeyMap.PREV_FRAME}
                     forwardShortcut={normalizedKeyMap.FORWARD_FRAME}
@@ -717,7 +761,6 @@ class AnnotationTopBarContainer extends React.PureComponent<Props, State> {
                     onSwitchToolsBlockerState={this.onSwitchToolsBlockerState}
                     toolsBlockerState={toolsBlockerState}
                     jobInstance={jobInstance}
-                    isTrainingActive={isTrainingActive}
                     activeControl={activeControl}
                 />
             </>

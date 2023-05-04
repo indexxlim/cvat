@@ -1,14 +1,20 @@
-// Copyright (C) 2020 Intel Corporation
+// Copyright (C) 2020-2022 Intel Corporation
 //
 // SPDX-License-Identifier: MIT
 
 @import '../../base.scss';
 
-.cvat-share-tree {
+.cvat-share-tree-initialization {
     height: 32 * $grid-unit-size;
 }
 
+.cvat-share-tree {
+    @extend .cvat-share-tree-initialization;
+}
+
 .cvat-empty-share-tree {
+    @extend .cvat-share-tree-initialization;
+
     > .ant-typography {
         margin-top: 10px;
     }
